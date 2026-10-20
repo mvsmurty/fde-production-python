@@ -1,18 +1,19 @@
+import asyncio
 import logging
 import time
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, Request, Response
 
 from app.config import Settings, get_settings
+from app.prod.errors import APIError
 from app.prod.models import TicketAnalysis, TicketIn
 from app.prod.observability import trace_id_var
-from app.prod.service import analyze_ticket
+from app.prod.ratelimit import rate_limit
+from app.prod.service import LLMOutage, analyze_ticket
 
 log = logging.getLogger("triage.api")
-
-router = APIRouter(prefix="/prod", tags=["production"])
 
 
 async def bind_trace_id(
@@ -24,11 +25,24 @@ async def bind_trace_id(
     return trace_id
 
 
+def get_llm_slots(request: Request) -> asyncio.Semaphore:
+    slots: asyncio.Semaphore = request.app.state.llm_slots
+    return slots
+
+
+router = APIRouter(
+    prefix="/prod",
+    tags=["production"],
+    dependencies=[Depends(bind_trace_id), Depends(rate_limit)],
+)
+
+
 @router.post("/tickets/analyze")
 async def analyze(
     ticket: TicketIn,
     trace_id: Annotated[str, Depends(bind_trace_id)],
     settings: Annotated[Settings, Depends(get_settings)],
+    slots: Annotated[asyncio.Semaphore, Depends(get_llm_slots)],
 ) -> TicketAnalysis:
     started = time.perf_counter()
     log.info(
@@ -41,11 +55,18 @@ async def analyze(
         },
     )
     try:
-        result = await analyze_ticket(ticket, trace_id, settings)
+        result = await analyze_ticket(ticket, trace_id, settings, slots)
+    except LLMOutage as exc:
+        log.error("llm_outage", extra={"ticket_id": ticket.ticket_id, "reason": str(exc)})
+        raise APIError(
+            503, "llm_unavailable", "The language model is unavailable. Retry shortly.",
+            headers={"Retry-After": "30"},
+        ) from None
     except Exception:
         log.exception("ticket_analysis_failed", extra={"ticket_id": ticket.ticket_id})
-        raise HTTPException(
-            status_code=500, detail={"error": "internal_error", "trace_id": trace_id}
+        raise APIError(
+            500, "internal_error",
+            "Something went wrong on our side. Quote the trace id when reporting it.",
         ) from None
     log.info(
         "ticket_analyzed",

@@ -19,17 +19,27 @@ Task = Literal["summarize", "classify", "sentiment"]
 
 BASE_LATENCY_S = 0.4
 SLOW_LATENCY_S = 1.2
+FAST_LATENCY_S = 0.05
 HANG_S = 12.0
+PROVIDER_RETRY_AFTER_S = 1.0
 
 
 class LLMUnavailableError(Exception):
-    """The provider returned 503 / overloaded."""
+    """The provider is temporarily unable to answer (503, overloaded). Safe to retry."""
+
+
+class LLMRateLimitedError(LLMUnavailableError):
+    """The provider returned 429 and told us how long to wait."""
+
+    def __init__(self, retry_after: float):
+        super().__init__(f"429 Too Many Requests: retry after {retry_after:g}s")
+        self.retry_after = retry_after
 
 
 @dataclass
 class _Plan:
     delay: float
-    fail: bool = False
+    error: Exception | None = None
     garbage: bool = False
 
 
@@ -40,19 +50,34 @@ def _plan(task: Task) -> _Plan:
     match state.scenario:
         case "slow":
             return _Plan(SLOW_LATENCY_S)
+        case "flood":
+            return _Plan(FAST_LATENCY_S)
         case "hang" if task == "sentiment":
             return _Plan(HANG_S)
-        case "flaky" if task == "classify" and attempt == 1:
-            return _Plan(0.2, fail=True)
+        case "ratelimit" if attempt == 1:
+            return _Plan(0.1, error=LLMRateLimitedError(PROVIDER_RETRY_AFTER_S))
+        case "outage":
+            return _Plan(0.1, error=LLMUnavailableError("503 Service Unavailable"))
+        case "bug" if task == "summarize":
+            # Stands in for our own parsing code assuming a field the response doesn't have.
+            return _Plan(0.2, error=KeyError("choices"))
         case "garbage" if task == "classify":
             return _Plan(BASE_LATENCY_S, garbage=True)
         case _:
             return _Plan(BASE_LATENCY_S)
 
 
+def _outcome(exc: BaseException) -> str:
+    if isinstance(exc, LLMRateLimitedError):
+        return "429"
+    if isinstance(exc, LLMUnavailableError):
+        return "503"
+    return "error"
+
+
 def _answer(task: Task, text: str, plan: _Plan) -> str:
-    if plan.fail:
-        raise LLMUnavailableError("503 Service Unavailable: model overloaded, retry later")
+    if plan.error is not None:
+        raise plan.error
     lowered = text.lower()
     if task == "summarize":
         first = text.strip().split("\n")[0][:80]
@@ -95,8 +120,8 @@ class MockLLMClient:
         try:
             time.sleep(plan.delay)
             result = _answer(task, text, plan)
-        except Exception:
-            span.close("error")
+        except Exception as exc:
+            span.close(_outcome(exc))
             raise
         span.close("ok")
         return result
@@ -110,8 +135,8 @@ class MockLLMClient:
         except asyncio.CancelledError:
             span.close("timeout")
             raise
-        except Exception:
-            span.close("error")
+        except Exception as exc:
+            span.close(_outcome(exc))
             raise
         span.close("ok")
         return result
@@ -159,7 +184,13 @@ class XAIClient:
 
     @staticmethod
     def _content(response: httpx.Response) -> str:
-        if response.status_code == 429 or response.status_code >= 500:
+        if response.status_code == 429:
+            try:
+                retry_after = float(response.headers.get("retry-after", "1"))
+            except ValueError:
+                retry_after = 1.0
+            raise LLMRateLimitedError(retry_after)
+        if response.status_code >= 500:
             raise LLMUnavailableError(f"{response.status_code} from xAI")
         response.raise_for_status()
         content: str = response.json()["choices"][0]["message"]["content"]
@@ -172,8 +203,8 @@ class XAIClient:
             with httpx.Client(timeout=60) as client:
                 response = client.post(self._url, headers=self._headers, json=self._payload(task, text))
             result = self._content(response)
-        except Exception:
-            span.close("error")
+        except Exception as exc:
+            span.close(_outcome(exc))
             raise
         span.close("ok")
         return result
@@ -191,8 +222,8 @@ class XAIClient:
         except asyncio.CancelledError:
             span.close("timeout")
             raise
-        except Exception:
-            span.close("error")
+        except Exception as exc:
+            span.close(_outcome(exc))
             raise
         span.close("ok")
         return result

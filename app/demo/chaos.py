@@ -6,8 +6,12 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Literal
 
-Scenario = Literal["none", "slow", "flaky", "hang", "garbage", "load"]
-SCENARIOS: tuple[Scenario, ...] = ("none", "slow", "flaky", "hang", "garbage", "load")
+Scenario = Literal[
+    "none", "slow", "load", "ratelimit", "flood", "hang", "outage", "bug", "garbage"
+]
+SCENARIOS: tuple[Scenario, ...] = (
+    "none", "slow", "load", "ratelimit", "flood", "hang", "outage", "bug", "garbage"
+)
 
 
 @dataclass

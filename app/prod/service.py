@@ -1,11 +1,12 @@
 import asyncio
 import logging
+import random
 from collections.abc import Callable
 
 from pydantic import TypeAdapter, ValidationError
 
 from app.config import Settings
-from app.llm import LLMUnavailableError, Task, llm
+from app.llm import LLMRateLimitedError, LLMUnavailableError, Task, llm
 from app.prod.models import LLMClassification, NonEmptyStr, Sentiment, TicketAnalysis, TicketIn
 
 log = logging.getLogger("triage.service")
@@ -16,7 +17,11 @@ FALLBACK_CLASSIFICATION = LLMClassification(category="other", priority="P2")
 
 
 class LLMCallFailed(Exception):
-    pass
+    """One LLM call failed in an expected way (timeout, provider down, bad output)."""
+
+
+class LLMOutage(Exception):
+    """Every LLM call failed: there is nothing useful to return."""
 
 
 def parse_summary(raw: str) -> str:
@@ -28,21 +33,36 @@ def parse_sentiment(raw: str) -> Sentiment:
 
 
 async def call_llm[T](
-    task: Task, text: str, parse: Callable[[str], T], settings: Settings
+    task: Task,
+    text: str,
+    parse: Callable[[str], T],
+    settings: Settings,
+    slots: asyncio.Semaphore,
 ) -> tuple[T, int]:
-    """One LLM call with a timeout, retries for transient errors, and validated output.
+    """One LLM call: concurrency-capped, time-limited, retried when that can help, output validated.
 
     Timeouts are not retried: a hung provider would just burn the latency budget twice.
+    Anything unexpected (a bug) is not caught here, so it surfaces instead of being hidden.
     """
     reason = "unknown error"
     for attempt in range(1, settings.llm_max_attempts + 1):
+        wait = settings.llm_retry_backoff_s * attempt * random.uniform(0.8, 1.2)
         try:
-            async with asyncio.timeout(settings.llm_timeout_s):
-                raw = await llm.acomplete(task, text)
+            async with slots:
+                async with asyncio.timeout(settings.llm_timeout_s):
+                    raw = await llm.acomplete(task, text)
             return parse(raw), attempt
         except TimeoutError:
             log.warning("llm_timeout", extra={"task": task, "timeout_s": settings.llm_timeout_s})
             raise LLMCallFailed(f"{task}: no response within {settings.llm_timeout_s}s") from None
+        except LLMRateLimitedError as exc:
+            if exc.retry_after > settings.llm_max_retry_after_s:
+                raise LLMCallFailed(f"{task}: rate limited for {exc.retry_after:g}s") from None
+            reason, wait = "rate limited", exc.retry_after
+            log.warning(
+                "llm_rate_limited",
+                extra={"task": task, "attempt": attempt, "retry_after_s": exc.retry_after},
+            )
         except LLMUnavailableError as exc:
             reason = "provider unavailable"
             log.warning("llm_unavailable", extra={"task": task, "attempt": attempt, "error": str(exc)})
@@ -53,7 +73,7 @@ async def call_llm[T](
                 extra={"task": task, "attempt": attempt, "errors": exc.error_count()},
             )
         if attempt < settings.llm_max_attempts:
-            await asyncio.sleep(settings.llm_retry_backoff_s * attempt)
+            await asyncio.sleep(wait)
     raise LLMCallFailed(f"{task}: {reason} after {settings.llm_max_attempts} attempts")
 
 
@@ -72,12 +92,14 @@ def _unwrap[T](
     return value, False
 
 
-async def analyze_ticket(ticket: TicketIn, trace_id: str, settings: Settings) -> TicketAnalysis:
+async def analyze_ticket(
+    ticket: TicketIn, trace_id: str, settings: Settings, slots: asyncio.Semaphore
+) -> TicketAnalysis:
     text = f"{ticket.subject}\n{ticket.body}"
     summary_r, classification_r, sentiment_r = await asyncio.gather(
-        call_llm("summarize", text, parse_summary, settings),
-        call_llm("classify", text, LLMClassification.model_validate_json, settings),
-        call_llm("sentiment", text, parse_sentiment, settings),
+        call_llm("summarize", text, parse_summary, settings, slots),
+        call_llm("classify", text, LLMClassification.model_validate_json, settings, slots),
+        call_llm("sentiment", text, parse_sentiment, settings, slots),
         return_exceptions=True,
     )
 
@@ -87,6 +109,8 @@ async def analyze_ticket(ticket: TicketIn, trace_id: str, settings: Settings) ->
         classification_r, "classify", FALLBACK_CLASSIFICATION, warnings
     )
     sentiment, sentiment_failed = _unwrap(sentiment_r, "sentiment", "unknown", warnings)
+    if summary_failed and classify_failed and sentiment_failed:
+        raise LLMOutage("; ".join(warnings))
 
     return TicketAnalysis(
         ticket_id=ticket.ticket_id,

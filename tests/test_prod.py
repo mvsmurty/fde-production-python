@@ -14,10 +14,16 @@ TICKET = {
 URL = "/prod/tickets/analyze"
 
 
+def _client(**overrides: object) -> TestClient:
+    values: dict[str, object] = {"llm_timeout_s": 1.0, "rate_limit_requests": 1000, **overrides}
+    settings = Settings(**values)  # type: ignore[arg-type]
+    app.dependency_overrides[get_settings] = lambda: settings
+    return TestClient(app)
+
+
 @pytest.fixture
 def client() -> TestClient:
-    app.dependency_overrides[get_settings] = lambda: Settings(llm_timeout_s=1.0)
-    with TestClient(app) as c:
+    with _client() as c:
         yield c  # type: ignore[misc]
     app.dependency_overrides.clear()
 
@@ -41,9 +47,10 @@ def test_bad_input_returns_field_level_422(client: TestClient) -> None:
     assert {"body", "customer_email", "message"} <= fields
 
 
-def test_flaky_provider_recovers_with_retry(client: TestClient) -> None:
-    r = client.post(URL, json=TICKET, headers={"X-Chaos": "flaky"})
+def test_provider_429_is_retried_after_retry_after(client: TestClient) -> None:
+    r = client.post(URL, json=TICKET, headers={"X-Chaos": "ratelimit"})
     assert r.status_code == 200
+    assert r.json()["degraded"] is False
     assert any("recovered" in w for w in r.json()["warnings"])
 
 
@@ -61,3 +68,30 @@ def test_garbage_llm_output_goes_to_human_review(client: TestClient) -> None:
     body = r.json()
     assert body["needs_human_review"] is True
     assert body["category"] == "other"
+
+
+def test_provider_outage_returns_503_with_retry_after(client: TestClient) -> None:
+    r = client.post(URL, json=TICKET, headers={"X-Chaos": "outage"})
+    assert r.status_code == 503
+    assert r.headers["Retry-After"] == "30"
+    assert r.json()["error"] == "llm_unavailable"
+
+
+def test_bug_returns_500_with_trace_id_and_no_internals(client: TestClient) -> None:
+    r = client.post(URL, json=TICKET, headers={"X-Chaos": "bug"})
+    body = r.json()
+    assert r.status_code == 500
+    assert body["error"] == "internal_error"
+    assert body["trace_id"] == r.headers["X-Trace-Id"]
+    assert "choices" not in r.text
+
+
+def test_client_over_its_limit_gets_429() -> None:
+    with _client(rate_limit_requests=2) as c:
+        headers = {"X-Client-Id": "flooder", "X-Chaos": "flood"}
+        codes = [c.post(URL, json=TICKET, headers=headers).status_code for _ in range(4)]
+        last = c.post(URL, json=TICKET, headers=headers)
+    app.dependency_overrides.clear()
+    assert codes == [200, 200, 429, 429]
+    assert int(last.headers["Retry-After"]) >= 1
+    assert last.json()["error"] == "rate_limited"

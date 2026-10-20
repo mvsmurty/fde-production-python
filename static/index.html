@@ -96,6 +96,11 @@ details pre { margin: 10px 0 0; }
 .marker { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fail); }
 .axis { display: grid; grid-template-columns: 104px 1fr; gap: 8px; font-size: 12px; color: var(--muted); }
 .axis div:last-child { display: flex; justify-content: space-between; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 600 13px ui-monospace, Menlo, monospace; padding: 5px 9px; border-radius: 6px; }
+.chip.ok { background: var(--pass-bg); color: var(--pass); }
+.chip.rej { background: var(--warn-bg); color: var(--warn); }
+.chip.err { background: var(--fail-bg); color: var(--fail); }
 .empty { color: var(--muted); font-size: 14px; font-style: italic; padding: 4px 0; }
 
 pre.code { background: var(--code-bg); color: var(--code-ink); border-radius: 8px; padding: 10px 12px; font-size: 12.5px; line-height: 1.55; overflow: auto; max-height: 260px; margin: 0; white-space: pre-wrap; word-break: break-word; }
@@ -194,51 +199,69 @@ const TICKET = {
 
 const SCENARIOS = [
   {
-    id: "happy", title: "Happy path", tag: "It works in the demo", chaos: "none", payload: TICKET,
-    sim: "A normal ticket and a healthy LLM.",
-    watch: "Both return 200. This is why the naive version gets shipped: its problems stay hidden until something goes wrong.",
+    id: "happy", title: "Works in development", tag: "One user, healthy model", chaos: "none", payload: TICKET,
+    sim: "A normal ticket and a healthy LLM: exactly what you tested on your laptop.",
+    watch: "Both return 200. This is why the naive version gets shipped: its problems stay hidden until production traffic arrives.",
     fixes: ["Typed response model (<code>TicketAnalysis</code>) so callers know exactly what they get", "A trace id on every response and log line"],
   },
   {
-    id: "bad-input", title: "Unexpected input", tag: "Client sends the wrong shape", chaos: "none",
-    payload: { ticket_id: "TCK-10294", channel: "E-Mail", customer_email: "priya.sharma[at]example.com", subject: "Charged twice", message: "Hi, I was charged twice for order #A-77812." },
-    sim: "An old version of the mobile app sends <code>message</code> instead of <code>body</code>, plus a malformed email.",
-    watch: "Naive crashes with a 500 and tells the caller nothing useful. Production rejects it with a 422 that names every bad field, before spending a single token.",
-    fixes: ["Pydantic model at the edge: <code>TicketIn</code> in <code>app/prod/models.py</code>", "<code>extra=\"forbid\"</code> catches renamed fields; <code>EmailStr</code> catches bad emails", "<code>\"E-Mail\"</code> normalised to <code>\"email\"</code> by a <code>field_validator</code>", "A readable 422 handler in <code>app/main.py</code>"],
-  },
-  {
-    id: "slow", title: "Slow LLM", tag: "Every call takes 1.2s", chaos: "slow", payload: TICKET,
-    sim: "The provider is having a slow day: each call takes 1.2 seconds.",
+    id: "slow", title: "Slow provider", tag: "Every call takes 1.2 s", chaos: "slow", payload: TICKET,
+    sim: "<b>In development</b> the model answered in 400 ms. <b>In production</b> the provider has a slow day: 1.2 s per call.",
     watch: "Look at the timeline. Naive makes its three calls one after another. Production starts all three at once with asyncio.gather.",
     fixes: ["<code>asyncio.gather(...)</code> in <code>analyze_ticket</code>: total time is the slowest call, not the sum", "Async client (<code>acomplete</code>) so waiting doesn't block other requests"],
   },
   {
-    id: "flaky", title: "Flaky provider", tag: "First call gets a 503", chaos: "flaky", payload: TICKET,
-    sim: "The classify call hits a 503 \"model overloaded\" error on its first attempt.",
-    watch: "Naive turns a brief provider glitch into a failed ticket. Production retries with backoff and recovers.",
-    fixes: ["Retry with backoff for transient errors in <code>call_llm</code>", "Retries are bounded (<code>TRIAGE_LLM_MAX_ATTEMPTS</code>), and the recovery is reported in <code>warnings</code>"],
-  },
-  {
-    id: "hang", title: "LLM hangs", tag: "One call never returns", chaos: "hang", payload: TICKET,
-    sim: "The sentiment call hangs for 12 seconds.",
-    watch: "Naive waits indefinitely, and because it blocks the event loop the whole server freezes (watch the indicator at the top). Production gives up on that call after 3s and returns the rest, flagged as degraded.",
-    fixes: ["<code>asyncio.timeout(...)</code> around every LLM call", "<code>gather(..., return_exceptions=True)</code> so one failed call doesn't sink the other two", "Partial result with <code>degraded: true</code> instead of an error page"],
-  },
-  {
-    id: "garbage", title: "Bad model output", tag: "LLM returns \"URGENT!!!\"", chaos: "garbage", payload: TICKET,
-    sim: "The model ignores the format and returns priority <code>\"URGENT!!!\"</code> and category <code>\"Billing Issue??\"</code>.",
-    watch: "The worst kind of failure: naive returns 200 OK with garbage, and nothing alerts anyone. Production validates the model's output, retries once, then falls back safely and flags the ticket for a human.",
-    fixes: ["LLM output parsed into <code>LLMClassification</code> with <code>Literal</code> types", "Safe fallback plus <code>needs_human_review: true</code> instead of passing bad data downstream"],
-  },
-  {
     id: "load", title: "Traffic spike", tag: "5 users at once", chaos: "load", payload: TICKET, load: 5,
-    sim: "Five agents submit tickets at the same moment.",
+    sim: "<b>In development</b> you were the only user. <b>In production</b> five agents submit tickets at the same moment.",
     watch: "Naive uses a blocking client inside async def, so requests are handled one at a time and even /health stops responding. Production serves all five at once.",
     fixes: ["Never call blocking code inside <code>async def</code>; use the async client", "In real code this is the <code>OpenAI()</code> vs <code>AsyncOpenAI()</code> mistake, or <code>requests</code> vs <code>httpx.AsyncClient</code>"],
   },
   {
+    id: "ratelimit", title: "Provider rate limit", tag: "429, retry after 1 s", chaos: "ratelimit", payload: TICKET,
+    sim: "<b>In development</b> a few calls a minute never hit the provider's limit. <b>In production</b> the provider answers 429 Too Many Requests with Retry-After: 1.",
+    watch: "Naive treats \"slow down\" as a crash. Production waits exactly as long as the provider asked, then succeeds. It also caps how many LLM calls it has in flight, so it hits the limit less often.",
+    fixes: ["Handle <code>429</code> separately: honour <code>Retry-After</code>, up to a cap (<code>TRIAGE_LLM_MAX_RETRY_AFTER_S</code>)", "Backoff with jitter for other transient errors, so retries don't arrive in lockstep", "<code>asyncio.Semaphore</code> caps LLM calls in flight (<code>TRIAGE_LLM_MAX_CONCURRENCY</code>), created once in <code>lifespan</code>"],
+  },
+  {
+    id: "flood", title: "Client floods your API", tag: "12 requests from one client", chaos: "flood", payload: TICKET, flood: 12,
+    sim: "<b>In development</b> nobody hammered your laptop. <b>In production</b> one client's retry loop sends 12 requests in a row.",
+    watch: "Naive accepts all 12 and pays for 36 LLM calls. Production allows 5 per 10 s per client and answers the rest with 429 and Retry-After, before any LLM call.",
+    fixes: ["A rate-limit dependency on the router: <code>app/prod/ratelimit.py</code>", "429 with <code>Retry-After</code> tells well-behaved clients exactly when to come back", "In memory per process here; behind several replicas use Redis or the API gateway"],
+  },
+  {
+    id: "hang", title: "Provider hangs", tag: "One call never returns", chaos: "hang", payload: TICKET,
+    sim: "<b>In development</b> the provider always answered. <b>In production</b> the sentiment call hangs for 12 seconds.",
+    watch: "Naive waits indefinitely, and because it blocks the event loop the whole server freezes (watch the indicator at the top). Production gives up on that call after 3 s and returns the rest, flagged as degraded.",
+    fixes: ["<code>asyncio.timeout(...)</code> around every LLM call", "<code>gather(..., return_exceptions=True)</code> so one failed call doesn't sink the other two", "Partial result with <code>degraded: true</code> instead of an error page"],
+  },
+  {
+    id: "outage", title: "Provider outage", tag: "Every call returns 503", chaos: "outage", payload: TICKET,
+    sim: "<b>In development</b> the provider was up. <b>In production</b> it goes down: every call returns 503.",
+    watch: "Naive reports someone else's outage as its own crash (500). Production retries, then returns 503 with Retry-After, so the caller knows it's temporary and when to try again.",
+    fixes: ["Separate error types: 4xx (caller's fault), 503 (dependency down), 500 (our bug)", "One error shape for every failure: <code>APIError</code> plus a handler in <code>app/main.py</code>", "<code>Retry-After</code> on 503 so clients back off instead of hammering"],
+  },
+  {
+    id: "bug", title: "Bug in our code", tag: "An unexpected KeyError", chaos: "bug", payload: TICKET,
+    sim: "<b>In development</b> the response always had the field our parser expected. <b>In production</b> it doesn't, and our code raises KeyError.",
+    watch: "Naive returns a bare 500; the stack trace is in the server log with nothing linking it to this request. Production returns a clean 500 with a trace id, and logs the full stack trace under the same id.",
+    fixes: ["Catch-all at the route: log with <code>log.exception</code>, return a generic 500 with the trace id", "Never leak internals (stack traces, exception text) to callers", "Never swallow errors: unexpected exceptions are re-raised, not turned into fallbacks"],
+  },
+  {
+    id: "bad-input", title: "Unexpected input", tag: "Client sends the wrong shape", chaos: "none",
+    payload: { ticket_id: "TCK-10294", channel: "E-Mail", customer_email: "priya.sharma[at]example.com", subject: "Charged twice", message: "Hi, I was charged twice for order #A-77812." },
+    sim: "<b>In development</b> you sent perfect JSON. <b>In production</b> an old app version sends <code>message</code> instead of <code>body</code>, plus a malformed email.",
+    watch: "Naive crashes with a 500 and tells the caller nothing useful. Production rejects it with a 422 that names every bad field, before spending a single token.",
+    fixes: ["Pydantic model at the edge: <code>TicketIn</code> in <code>app/prod/models.py</code>", "<code>extra=\"forbid\"</code> catches renamed fields; <code>EmailStr</code> catches bad emails; <code>max_length</code> stops oversized input", "<code>\"E-Mail\"</code> normalised to <code>\"email\"</code> by a <code>field_validator</code>"],
+  },
+  {
+    id: "garbage", title: "Bad model output", tag: "LLM returns \"URGENT!!!\"", chaos: "garbage", payload: TICKET,
+    sim: "<b>In development</b> your five test prompts all came back clean. <b>In production</b> the model returns priority <code>\"URGENT!!!\"</code>.",
+    watch: "The worst kind of failure: naive returns 200 OK with garbage, and nothing alerts anyone. Production validates the model's output, retries once, then falls back safely and flags the ticket for a human.",
+    fixes: ["LLM output parsed into <code>LLMClassification</code> with <code>Literal</code> types", "Safe fallback plus <code>needs_human_review: true</code> instead of passing bad data downstream"],
+  },
+  {
     id: "logs", title: "Logs and secrets", tag: "What ends up in your logs", chaos: "none", payload: TICKET,
-    sim: "A normal request. This time, look at the server logs.",
+    sim: "<b>In development</b> you read print() output in one terminal. <b>In production</b> logs from every replica go to a shared system that many people can read.",
     watch: "Naive prints every header (including the Authorization token) plus the customer's email and phone number. Production writes one JSON object per line, with a trace id, and scrubs personal data.",
     fixes: ["<code>JsonFormatter</code> in <code>app/prod/observability.py</code>: structured, searchable, one event per line", "Trace id from a <code>ContextVar</code>, so every line of a request can be found together", "Redaction as a last line of defence; better still, don't log headers or bodies at all"],
   },
@@ -306,6 +329,8 @@ async function waitForServer() {
 }
 
 // ---------- calling the endpoints ----------
+let runClientId = "demo";
+
 async function callOnce(kind, sc, overrides = {}) {
   const rid = crypto.randomUUID();
   const ctrl = new AbortController();
@@ -315,7 +340,7 @@ async function callOnce(kind, sc, overrides = {}) {
   try {
     const res = await fetch(`/${kind}/tickets/analyze`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: AUTH, "X-Chaos": sc.chaos, "X-Demo-Request-Id": rid },
+      headers: { "Content-Type": "application/json", Authorization: AUTH, "X-Chaos": sc.chaos, "X-Client-Id": runClientId, "X-Demo-Request-Id": rid },
       body: JSON.stringify({ ...sc.payload, ...overrides }),
       signal: ctrl.signal,
     });
@@ -335,6 +360,14 @@ async function callLoad(kind, sc) {
   return { kind, load: true, reqs, t0, t1, ms: t1 - t0 };
 }
 
+async function callFlood(kind, sc) {
+  const t0 = performance.now();
+  const reqs = [];
+  for (let i = 0; i < sc.flood; i++) reqs.push(await callOnce(kind, sc, { ticket_id: `TCK-300${String(i + 1).padStart(2, "0")}` }));
+  const t1 = performance.now();
+  return { kind, flood: true, reqs, t0, t1, ms: t1 - t0 };
+}
+
 async function logsAfter(seq) {
   const r = await fetch(`/demo/logs?after=${seq}`, { cache: "no-store" });
   return r.json();
@@ -347,13 +380,14 @@ async function spansFor(rid) {
 
 async function runSide(kind, sc, cursor) {
   setColRunning(kind);
-  const result = sc.load ? await callLoad(kind, sc) : await callOnce(kind, sc);
+  runClientId = `${kind}-${crypto.randomUUID().slice(0, 8)}`;
+  const result = sc.load ? await callLoad(kind, sc) : sc.flood ? await callFlood(kind, sc) : await callOnce(kind, sc);
   const recoveredAt = await waitForServer();
   result.freezeMs = freezeBetween(result.t0, recoveredAt);
   const logs = await logsAfter(cursor);
   result.logs = logs.lines;
   result.cursor = logs.last_seq;
-  result.spans = result.load ? [] : await spansFor(result.rid);
+  result.spans = result.load || result.flood ? [] : await spansFor(result.rid);
   return result;
 }
 
@@ -396,8 +430,24 @@ function judge(sc, r) {
     if (r.freezeMs > 1000) return ["fail", `Handled one at a time: the last user waited ${fmt(last)}.${freeze}`];
     return ["pass", `All ${r.reqs.length} users served together in ${fmt(last)}. The server stayed responsive.`];
   }
+  if (r.flood) {
+    const accepted = r.reqs.filter((q) => q.status === 200).length;
+    const rejected = r.reqs.filter((q) => q.status === 429).length;
+    if (!rejected) return ["fail", `Accepted all ${accepted}: ${accepted * 3} LLM calls billed for one noisy client, while everyone else waits behind them.`];
+    return ["pass", `Accepted ${accepted}, rejected ${rejected} with 429 and Retry-After. Past the limit, the flood costs no LLM calls.`];
+  }
   if (r.aborted) return ["fail", `No response after ${CLIENT_TIMEOUT_MS / 1000} s. The user is still looking at a spinner.${freeze}`];
-  if (r.status >= 500) return ["fail", `Crashed with HTTP ${r.status}. The caller gets "Internal Server Error" and no idea why.${freeze}`];
+  const structured = r.body && typeof r.body === "object" && r.body.trace_id;
+  if (r.status === 503 && structured) return ["pass", "Provider down: HTTP 503 with Retry-After: 30. The caller knows it's temporary and when to try again."];
+  if (r.status === 500 && structured) return ["pass", "HTTP 500 with a trace id and no internals. The full stack trace is logged under the same id."];
+  if (r.status >= 500) {
+    const why = {
+      ratelimit: "The provider said \"wait 1 s and retry\". Naive crashed with HTTP 500 instead.",
+      outage: "Someone else's outage reported as our crash (HTTP 500). The caller can't tell \"retry later\" from \"broken\".",
+      bug: "HTTP 500 and no id. The stack trace is in the server log, with nothing linking it to this request.",
+    }[sc.id] || `Crashed with HTTP ${r.status}. The caller gets "Internal Server Error" and no idea why.`;
+    return ["fail", why + freeze];
+  }
   if (r.status === 422) return ["pass", "Rejected with HTTP 422, naming each bad field, so the caller can fix it."];
   if (r.status !== 200) return ["warn", `HTTP ${r.status}`];
   if (!isValid(r.body)) return ["fail", `HTTP 200, but the data is garbage (priority "${r.body.priority}"). No error, no alert, and downstream routing breaks.`];
@@ -408,7 +458,11 @@ function judge(sc, r) {
   }
   if (r.body.needs_human_review) return ["pass", "Bad model output caught by validation. Safe fallback, ticket flagged for a human."];
   if (r.body.degraded) return ["pass", `Answered in ${fmt(r.ms)} with what it had. The hung call was cut off and the result flagged as degraded.`];
-  if ((r.body.warnings || []).some((w) => w.includes("recovered"))) return ["pass", "Hit the 503, retried with backoff, and recovered. The user never noticed."];
+  if ((r.body.warnings || []).some((w) => w.includes("recovered"))) {
+    return ["pass", sc.id === "ratelimit"
+      ? "Got 429 with Retry-After: 1 s, waited exactly that, then succeeded. The user just saw a slightly slower answer."
+      : "Hit a transient error, retried, and recovered. The user never noticed."];
+  }
   if (sc.id === "slow") {
     return r.ms > 2500
       ? ["warn", `Correct, but took ${fmt(r.ms)}: the three LLM calls ran one after another.${freeze}`]
@@ -431,6 +485,7 @@ function setVerdict(col, level, text) {
 function scaleFor(results) {
   let max = 1000;
   for (const r of results) {
+    if (r.flood) continue;
     if (r.load) r.reqs.forEach((q) => (max = Math.max(max, q.t1 - r.t0)));
     else {
       r.spans.forEach((s) => (max = Math.max(max, s.end_ms)));
@@ -449,8 +504,15 @@ function bar(left, width, cls, text, max) {
 
 function renderTimeline(col, sc, r, max) {
   const el = $(".timeline", col);
-  $(".tl-title", col).textContent = r.load ? "Requests (time until each user got an answer)" : "LLM calls";
+  $(".tl-title", col).textContent = r.load ? "Requests (time until each user got an answer)" : r.flood ? "Requests in order" : "LLM calls";
   let rows = "";
+  if (r.flood) {
+    el.innerHTML = `<div class="chips">${r.reqs.map((q, i) => {
+      const cls = q.status === 200 ? "ok" : q.status === 429 ? "rej" : "err";
+      return `<span class="chip ${cls}">#${i + 1} · ${q.aborted ? "none" : q.status}</span>`;
+    }).join("")}</div>`;
+    return;
+  }
   if (r.load) {
     r.reqs.forEach((q, i) => {
       const done = q.t1 - r.t0;
@@ -465,8 +527,9 @@ function renderTimeline(col, sc, r, max) {
     [...r.spans].sort((a, b) => a.start_ms - b.start_ms).forEach((s) => {
       const dur = s.end_ms - s.start_ms;
       const label = s.task + (s.attempt > 1 ? " (retry)" : "");
-      const note = s.outcome === "ok" ? fmt(dur) : `${s.outcome === "timeout" ? "timed out" : "503 error"} · ${fmt(dur)}`;
-      const cls = s.outcome === "ok" ? "" : s.outcome;
+      const outcomeLabel = { timeout: "timed out", 429: "429 rate limited", 503: "503 unavailable", error: "exception" }[s.outcome];
+      const note = s.outcome === "ok" ? fmt(dur) : `${outcomeLabel} · ${fmt(dur)}`;
+      const cls = s.outcome === "ok" ? "" : s.outcome === "timeout" ? "timeout" : "error";
       const marker = r.aborted ? `<div class="marker" style="left:${(CLIENT_TIMEOUT_MS / max) * 100}%" title="client gave up"></div>` : "";
       rows += `<div class="trow"><span class="lbl">${esc(label)}</span><div class="track">${bar(s.start_ms, dur, cls, note, max)}${marker}</div></div>`;
     });
@@ -477,13 +540,23 @@ function renderTimeline(col, sc, r, max) {
 
 function renderMetrics(col, r) {
   let status, statusCls, latency;
+  if (r.flood) {
+    const accepted = r.reqs.filter((q) => q.status === 200).length;
+    const rejected = r.reqs.filter((q) => q.status === 429).length;
+    $(".metrics", col).innerHTML = `
+      <div class="metric"><div class="k">Accepted</div><div class="v ${rejected ? "good" : "bad"}">${accepted} of ${r.reqs.length}</div></div>
+      <div class="metric"><div class="k">Rejected (429)</div><div class="v">${rejected}</div></div>
+      <div class="metric"><div class="k">LLM calls billed</div><div class="v ${rejected ? "good" : "bad"}">${accepted * 3}</div></div>`;
+    return;
+  }
   if (r.load) {
     const ok = r.reqs.filter((q) => q.status === 200).length;
     status = `${ok}/${r.reqs.length} OK`; statusCls = ok === r.reqs.length ? "good" : "bad";
     latency = fmt(Math.max(...r.reqs.map((q) => q.t1 - r.t0)));
   } else {
     status = r.aborted ? "No response" : `HTTP ${r.status}`;
-    statusCls = r.aborted || r.status >= 500 ? "bad" : r.status === 200 && !isValid(r.body) ? "bad" : "good";
+    const handled = r.body && typeof r.body === "object" && r.body.trace_id;
+    statusCls = r.aborted || (r.status >= 500 && !handled) ? "bad" : r.status >= 500 ? "" : r.status === 200 && !isValid(r.body) ? "bad" : "good";
     latency = r.aborted ? `> ${CLIENT_TIMEOUT_MS / 1000} s` : fmt(r.ms);
   }
   const frozen = r.freezeMs > 1500;
@@ -508,7 +581,9 @@ function renderCol(sc, r, scale) {
   setVerdict(col, level, text);
   renderMetrics(col, r);
   renderTimeline(col, sc, r, scale);
-  const body = r.load ? r.reqs.map((q) => q.body) : r.aborted ? "(no response: the browser gave up)" : r.body;
+  const body = r.flood
+    ? { statuses: r.reqs.map((q) => q.status), last_response: r.reqs[r.reqs.length - 1].body }
+    : r.load ? r.reqs.map((q) => q.body) : r.aborted ? "(no response: the browser gave up)" : r.body;
   $(".resp", col).textContent = typeof body === "string" ? body : JSON.stringify(body, null, 2);
   const lines = r.logs.slice(-40);
   $(".logs", col).innerHTML = lines.length ? lines.map((l) => highlightLog(l.text)).join("\n") : "(nothing logged)";
@@ -538,8 +613,8 @@ function setBusy(busy) {
 }
 
 function requestPreview(sc) {
-  const headers = { "Content-Type": "application/json", Authorization: AUTH, "X-Chaos": sc.chaos };
-  const n = sc.load ? `  (sent ${sc.load} times at once)` : "";
+  const headers = { "Content-Type": "application/json", Authorization: AUTH, "X-Client-Id": "<one id per run>", "X-Chaos": sc.chaos };
+  const n = sc.load ? `  (sent ${sc.load} times at once)` : sc.flood ? `  (sent ${sc.flood} times in a row by one client)` : "";
   return `POST /{naive|prod}/tickets/analyze${n}\n` +
     Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join("\n") +
     `\n\n${JSON.stringify(sc.payload, null, 2)}\n\n# X-Chaos tells the mock LLM which failure to simulate (demo only).`;
@@ -563,7 +638,7 @@ function select(sc) {
 function buildNav() {
   $("#nav").innerHTML = SCENARIOS.map((sc, i) =>
     `<button data-i="${i}"><span class="n">${i + 1}</span><span class="t">${esc(sc.title)}</span><span class="s">${esc(sc.tag)}</span></button>`
-  ).join("") + `<div class="hint">Keys: 1–${SCENARIOS.length} to choose, Enter to run</div>`;
+  ).join("") + `<div class="hint">Keys: 1–9 and 0 to choose, ↑ ↓ to move, Enter to run</div>`;
   $("#nav").addEventListener("click", (e) => {
     const b = e.target.closest("button");
     if (b && !running) select(SCENARIOS[+b.dataset.i]);
@@ -572,8 +647,11 @@ function buildNav() {
 
 document.addEventListener("keydown", (e) => {
   if (running || e.target.closest("input, textarea")) return;
-  const n = parseInt(e.key, 10);
+  const n = e.key === "0" ? 10 : parseInt(e.key, 10);
   if (n >= 1 && n <= SCENARIOS.length) select(SCENARIOS[n - 1]);
+  const i = SCENARIOS.indexOf(current);
+  if (e.key === "ArrowDown" && i < SCENARIOS.length - 1) { e.preventDefault(); select(SCENARIOS[i + 1]); }
+  if (e.key === "ArrowUp" && i > 0) { e.preventDefault(); select(SCENARIOS[i - 1]); }
   if (e.key === "Enter") run();
 });
 $("#run").addEventListener("click", run);

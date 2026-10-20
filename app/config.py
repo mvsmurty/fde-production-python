@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     llm_timeout_s: float = 3.0
     llm_max_attempts: int = 2
     llm_retry_backoff_s: float = 0.3
+    # Never sleep longer than this on a provider's Retry-After; fail instead and let the caller retry.
+    llm_max_retry_after_s: float = 5.0
+    # Cap on LLM calls in flight from this process, to stay under the provider's rate limit.
+    llm_max_concurrency: int = 8
+    rate_limit_requests: int = 5
+    rate_limit_window_s: float = 10.0
     log_level: str = "INFO"
     # Enables the chaos header, span tracking and the /demo endpoints. Never on in a real deployment.
     demo_mode: bool = True
