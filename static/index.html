@@ -29,6 +29,8 @@ button { font: inherit; cursor: pointer; }
 .topbar h1 { margin: 0; font-size: 19px; }
 .topbar p { margin: 0; color: var(--muted); font-size: 14px; }
 .top-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.left-pick { font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.left-pick select { font: inherit; font-weight: 600; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; }
 .llm { font-size: 13px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px; white-space: nowrap; }
 .llm b { color: var(--ink); }
 .pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; font-size: 14px; font-weight: 600; white-space: nowrap; transition: background .2s, color .2s; }
@@ -131,6 +133,13 @@ pre.code .lvl-warn { color: #f0b44c; } pre.code .lvl-err { color: #ff7b7b; }
     <p>Same ticket, same LLM, two endpoints.</p>
   </div>
   <div class="top-right">
+    <label class="left-pick">Compare
+      <select id="left-kind">
+        <option value="naive">Naive</option>
+        <option value="lab">Lab (your code)</option>
+      </select>
+      with production
+    </label>
     <span id="llm" class="llm"></span>
     <span id="pill" class="pill ok">Checking server…</span>
   </div>
@@ -348,7 +357,7 @@ async function callOnce(kind, sc, overrides = {}) {
   const t0 = performance.now();
   let status = null, body = null, aborted = false;
   try {
-    const res = await fetch(`/${kind}/tickets/analyze`, {
+    const res = await fetch(`/${kind === "naive" ? leftKind : kind}/tickets/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: AUTH, "X-Chaos": sc.chaos, "X-Client-Id": runClientId, "X-Demo-Request-Id": rid },
       body: JSON.stringify({ ...sc.payload, ...overrides }),
@@ -681,7 +690,7 @@ function buildNav() {
 }
 
 document.addEventListener("keydown", (e) => {
-  if (running || e.target.closest("input, textarea")) return;
+  if (running || e.target.closest("input, textarea, select")) return;
   const n = e.key === "0" ? 10 : parseInt(e.key, 10);
   if (n >= 1 && n <= SCENARIOS.length) select(SCENARIOS[n - 1]);
   const i = SCENARIOS.indexOf(current);
@@ -691,6 +700,23 @@ document.addEventListener("keydown", (e) => {
 });
 $("#run").addEventListener("click", run);
 
+let leftKind = "naive";
+try { leftKind = localStorage.getItem("leftKind") === "lab" ? "lab" : "naive"; } catch {}
+
+function applyLeftKind() {
+  $("#left-kind").value = leftKind;
+  $("#col-naive .tag").textContent = leftKind === "lab" ? "Lab" : "Naive";
+  $("#col-naive header code").textContent = `POST /${leftKind}/tickets/analyze`;
+}
+
+$("#left-kind").addEventListener("change", (e) => {
+  leftKind = e.target.value;
+  try { localStorage.setItem("leftKind", leftKind); } catch {}
+  applyLeftKind();
+  if (!running) select(current);
+});
+
+applyLeftKind();
 buildNav();
 select(SCENARIOS[0]);
 loadLLMInfo();

@@ -29,7 +29,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = "app.naive"
+module = ["app.naive", "app.lab"]
 ignore_errors = true
 
 [tool.pytest.ini_options]

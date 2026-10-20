@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
+from app.lab import router as lab_router
 from app.llm import llm
 from app.naive import router as naive_router
 from app.prod.errors import APIError
@@ -38,6 +39,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Ticket Triage", lifespan=lifespan)
 app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes, path_prefix="/prod")
 app.include_router(naive_router)
+app.include_router(lab_router)
 app.include_router(prod_router)
 
 
