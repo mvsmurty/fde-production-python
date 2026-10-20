@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ticket Triage Demo</title>
+<style>
+:root {
+  --bg: #f5f6f8; --panel: #ffffff; --ink: #1a1e24; --muted: #5d6673; --line: #e2e5ea;
+  --fail: #c62828; --fail-bg: #fdecea; --pass: #1b7a3a; --pass-bg: #e6f4eb;
+  --warn: #9a5800; --warn-bg: #fff3dd; --accent: #3550d0; --accent-ink: #ffffff;
+  --code-bg: #10151c; --code-ink: #d3dae3; --mark-leak: #ff5c5c; --mark-safe: #3fcf86;
+  --bar-ok: #3d6ee8; --bar-err: #d93636; --bar-timeout: #e39b1b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1015; --panel: #161b22; --ink: #e6edf3; --muted: #8d96a0; --line: #2a313b;
+    --fail: #ff7070; --fail-bg: #3a1719; --pass: #4cc38a; --pass-bg: #11291c;
+    --warn: #f0b44c; --warn-bg: #33250b; --accent: #7d92ff; --accent-ink: #0d1015;
+    --code-bg: #090c10;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+button { font: inherit; cursor: pointer; }
+
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+.topbar h1 { margin: 0; font-size: 19px; }
+.topbar p { margin: 0; color: var(--muted); font-size: 14px; }
+.pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; font-size: 14px; font-weight: 600; white-space: nowrap; transition: background .2s, color .2s; }
+.pill::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
+.pill.ok { background: var(--pass-bg); color: var(--pass); }
+.pill.bad { background: var(--fail-bg); color: var(--fail); animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: .6; } }
+
+.layout { display: grid; grid-template-columns: 270px 1fr; gap: 20px; padding: 20px 24px; max-width: 1600px; margin: 0 auto; }
+nav { display: flex; flex-direction: column; gap: 6px; }
+nav button { text-align: left; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: grid; grid-template-columns: 26px 1fr; column-gap: 6px; }
+nav button .n { color: var(--muted); font-weight: 700; grid-row: span 2; }
+nav button .t { font-weight: 600; }
+nav button .s { color: var(--muted); font-size: 13px; }
+nav button[aria-current="true"] { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+nav button:disabled { opacity: .55; cursor: not-allowed; }
+nav .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+
+main { min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+.head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.eyebrow { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
+.head h2 { margin: 2px 0 6px; font-size: 24px; }
+.head p { margin: 0; color: var(--muted); }
+#run { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 10px; padding: 11px 20px; font-weight: 700; white-space: nowrap; }
+#run:disabled { opacity: .5; cursor: progress; }
+.watch { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: var(--bg); }
+.watch strong { display: block; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+details pre { margin: 10px 0 0; }
+.status-line { color: var(--muted); font-size: 14px; min-height: 21px; }
+
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.col { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; min-width: 0; border-top: 4px solid var(--line); }
+.col.naive { border-top-color: var(--fail); }
+.col.prod { border-top-color: var(--pass); }
+.col header { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.col header .tag { font-weight: 800; font-size: 17px; }
+.col header code { color: var(--muted); font-size: 13px; }
+.col h4 { margin: 14px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.verdict { margin-top: 12px; padding: 12px 14px; border-radius: 9px; font-weight: 600; display: flex; gap: 10px; align-items: flex-start; min-height: 50px; }
+.verdict .badge { flex: none; font-size: 12px; font-weight: 800; letter-spacing: .06em; padding: 3px 8px; border-radius: 6px; color: #fff; margin-top: 1px; }
+.verdict.fail { background: var(--fail-bg); color: var(--fail); } .verdict.fail .badge { background: var(--fail); }
+.verdict.pass { background: var(--pass-bg); color: var(--pass); } .verdict.pass .badge { background: var(--pass); }
+.verdict.warn { background: var(--warn-bg); color: var(--warn); } .verdict.warn .badge { background: var(--warn); }
+.verdict.idle, .verdict.running { background: var(--bg); color: var(--muted); font-weight: 500; }
+.verdict.idle .badge, .verdict.running .badge { background: var(--muted); }
+.verdict.running .badge { background: var(--muted); animation: pulse 1s infinite; }
+.metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.metric { background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+.metric .k { font-size: 12px; color: var(--muted); }
+.metric .v { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.metric .v.bad { color: var(--fail); } .metric .v.good { color: var(--pass); }
+
+.timeline { display: flex; flex-direction: column; gap: 5px; }
+.trow { display: grid; grid-template-columns: 104px 1fr; align-items: center; gap: 8px; font-size: 13px; }
+.trow .lbl { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.track { position: relative; height: 22px; background: var(--bg); border-radius: 5px; }
+.bar { position: absolute; top: 0; bottom: 0; border-radius: 5px; background: var(--bar-ok); color: #fff; font-size: 12px; font-weight: 600; display: flex; align-items: center; padding: 0 6px; white-space: nowrap; overflow: visible; min-width: 3px; transition: width .4s ease-out; }
+.bar.error { background: var(--bar-err); }
+.bar.timeout { background: repeating-linear-gradient(45deg, var(--bar-timeout), var(--bar-timeout) 6px, #c98410 6px, #c98410 12px); }
+.blabel { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-top: 2px; }
+.legend .swatch { width: 10px; height: 2px; background: var(--fail); }
+.marker { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fail); }
+.axis { display: grid; grid-template-columns: 104px 1fr; gap: 8px; font-size: 12px; color: var(--muted); }
+.axis div:last-child { display: flex; justify-content: space-between; }
+.empty { color: var(--muted); font-size: 14px; font-style: italic; padding: 4px 0; }
+
+pre.code { background: var(--code-bg); color: var(--code-ink); border-radius: 8px; padding: 10px 12px; font-size: 12.5px; line-height: 1.55; overflow: auto; max-height: 260px; margin: 0; white-space: pre-wrap; word-break: break-word; }
+pre.code mark.leak { background: var(--mark-leak); color: #fff; border-radius: 3px; padding: 0 2px; }
+pre.code mark.safe { background: transparent; color: var(--mark-safe); font-weight: 700; }
+pre.code .lvl-warn { color: #f0b44c; } pre.code .lvl-err { color: #ff7b7b; }
+
+.fixes ul { margin: 8px 0 0; padding-left: 20px; }
+.fixes li { margin: 4px 0; }
+.fixes h3 { margin: 0; font-size: 16px; }
+.fixes code { font-size: 13px; background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+
+@media (max-width: 1000px) {
+  .layout { grid-template-columns: 1fr; padding: 16px; }
+  nav { flex-direction: row; overflow-x: auto; }
+  nav button { min-width: 190px; }
+  nav .hint { display: none; }
+  .cols { grid-template-columns: 1fr; }
+  .head { flex-direction: column; }
+  .topbar { padding: 12px 16px; flex-wrap: wrap; }
+}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>Ticket Triage: naive vs production</h1>
+    <p>Same ticket, same LLM, two endpoints.</p>
+  </div>
+  <span id="pill" class="pill ok">Checking server…</span>
+</header>
+
+<div class="layout">
+  <nav id="nav" aria-label="Scenarios"></nav>
+
+  <main>
+    <section class="card">
+      <div class="head">
+        <div>
+          <div class="eyebrow" id="eyebrow"></div>
+          <h2 id="title"></h2>
+          <p id="sim"></p>
+        </div>
+        <button id="run">Run scenario</button>
+      </div>
+      <div class="watch"><strong>What to watch</strong><span id="watch"></span></div>
+    </section>
+
+    <details class="card">
+      <summary>Request sent to both endpoints</summary>
+      <pre class="code" id="request"></pre>
+    </details>
+
+    <div class="status-line" id="status">Production runs first, because the naive endpoint can freeze the whole server.</div>
+
+    <div class="cols">
+      <article class="col naive" id="col-naive">
+        <header><span class="tag">Naive</span><code>POST /naive/tickets/analyze</code></header>
+        <div class="verdict idle"><span class="badge">READY</span><span class="vt">Not run yet</span></div>
+        <div class="metrics"></div>
+        <h4 class="tl-title">LLM calls</h4><div class="timeline"></div>
+        <h4>Response</h4><pre class="code resp">—</pre>
+        <h4>Server logs</h4><pre class="code logs">—</pre>
+      </article>
+      <article class="col prod" id="col-prod">
+        <header><span class="tag">Production</span><code>POST /prod/tickets/analyze</code></header>
+        <div class="verdict idle"><span class="badge">READY</span><span class="vt">Not run yet</span></div>
+        <div class="metrics"></div>
+        <h4 class="tl-title">LLM calls</h4><div class="timeline"></div>
+        <h4>Response</h4><pre class="code resp">—</pre>
+        <h4>Server logs</h4><pre class="code logs">—</pre>
+      </article>
+    </div>
+
+    <section class="card fixes">
+      <h3>What made the difference</h3>
+      <ul id="fixes"></ul>
+    </section>
+  </main>
+</div>
+
+<script>
+const CLIENT_TIMEOUT_MS = 8000;
+const AUTH = "Bearer demo-secret-token-9f8e7d";
+const CATEGORIES = ["billing", "technical", "account", "general", "other"];
+const TICKET = {
+  ticket_id: "TCK-10293",
+  channel: "WhatsApp",
+  customer_email: "priya.sharma@example.com",
+  subject: "Charged twice for my order",
+  body: "Hi, I was charged twice for order #A-77812. Please refund ASAP. Call me on +91 98765 43210. This is really frustrating!",
+};
+
+const SCENARIOS = [
+  {
+    id: "happy", title: "Happy path", tag: "It works in the demo", chaos: "none", payload: TICKET,
+    sim: "A normal ticket and a healthy LLM.",
+    watch: "Both return 200. This is why the naive version gets shipped: its problems stay hidden until something goes wrong.",
+    fixes: ["Typed response model (<code>TicketAnalysis</code>) so callers know exactly what they get", "A trace id on every response and log line"],
+  },
+  {
+    id: "bad-input", title: "Unexpected input", tag: "Client sends the wrong shape", chaos: "none",
+    payload: { ticket_id: "TCK-10294", channel: "E-Mail", customer_email: "priya.sharma[at]example.com", subject: "Charged twice", message: "Hi, I was charged twice for order #A-77812." },
+    sim: "An old version of the mobile app sends <code>message</code> instead of <code>body</code>, plus a malformed email.",
+    watch: "Naive crashes with a 500 and tells the caller nothing useful. Production rejects it with a 422 that names every bad field, before spending a single token.",
+    fixes: ["Pydantic model at the edge: <code>TicketIn</code> in <code>app/prod/models.py</code>", "<code>extra=\"forbid\"</code> catches renamed fields; <code>EmailStr</code> catches bad emails", "<code>\"E-Mail\"</code> normalised to <code>\"email\"</code> by a <code>field_validator</code>", "A readable 422 handler in <code>app/main.py</code>"],
+  },
+  {
+    id: "slow", title: "Slow LLM", tag: "Every call takes 1.2s", chaos: "slow", payload: TICKET,
+    sim: "The provider is having a slow day: each call takes 1.2 seconds.",
+    watch: "Look at the timeline. Naive makes its three calls one after another. Production starts all three at once with asyncio.gather.",
+    fixes: ["<code>asyncio.gather(...)</code> in <code>analyze_ticket</code>: total time is the slowest call, not the sum", "Async client (<code>acomplete</code>) so waiting doesn't block other requests"],
+  },
+  {
+    id: "flaky", title: "Flaky provider", tag: "First call gets a 503", chaos: "flaky", payload: TICKET,
+    sim: "The classify call hits a 503 \"model overloaded\" error on its first attempt.",
+    watch: "Naive turns a brief provider glitch into a failed ticket. Production retries with backoff and recovers.",
+    fixes: ["Retry with backoff for transient errors in <code>call_llm</code>", "Retries are bounded (<code>TRIAGE_LLM_MAX_ATTEMPTS</code>), and the recovery is reported in <code>warnings</code>"],
+  },
+  {
+    id: "hang", title: "LLM hangs", tag: "One call never returns", chaos: "hang", payload: TICKET,
+    sim: "The sentiment call hangs for 12 seconds.",
+    watch: "Naive waits indefinitely, and because it blocks the event loop the whole server freezes (watch the indicator at the top). Production gives up on that call after 3s and returns the rest, flagged as degraded.",
+    fixes: ["<code>asyncio.timeout(...)</code> around every LLM call", "<code>gather(..., return_exceptions=True)</code> so one failed call doesn't sink the other two", "Partial result with <code>degraded: true</code> instead of an error page"],
+  },
+  {
+    id: "garbage", title: "Bad model output", tag: "LLM returns \"URGENT!!!\"", chaos: "garbage", payload: TICKET,
+    sim: "The model ignores the format and returns priority <code>\"URGENT!!!\"</code> and category <code>\"Billing Issue??\"</code>.",
+    watch: "The worst kind of failure: naive returns 200 OK with garbage, and nothing alerts anyone. Production validates the model's output, retries once, then falls back safely and flags the ticket for a human.",
+    fixes: ["LLM output parsed into <code>LLMClassification</code> with <code>Literal</code> types", "Safe fallback plus <code>needs_human_review: true</code> instead of passing bad data downstream"],
+  },
+  {
+    id: "load", title: "Traffic spike", tag: "5 users at once", chaos: "load", payload: TICKET, load: 5,
+    sim: "Five agents submit tickets at the same moment.",
+    watch: "Naive uses a blocking client inside async def, so requests are handled one at a time and even /health stops responding. Production serves all five at once.",
+    fixes: ["Never call blocking code inside <code>async def</code>; use the async client", "In real code this is the <code>OpenAI()</code> vs <code>AsyncOpenAI()</code> mistake, or <code>requests</code> vs <code>httpx.AsyncClient</code>"],
+  },
+  {
+    id: "logs", title: "Logs and secrets", tag: "What ends up in your logs", chaos: "none", payload: TICKET,
+    sim: "A normal request. This time, look at the server logs.",
+    watch: "Naive prints every header (including the Authorization token) plus the customer's email and phone number. Production writes one JSON object per line, with a trace id, and scrubs personal data.",
+    fixes: ["<code>JsonFormatter</code> in <code>app/prod/observability.py</code>: structured, searchable, one event per line", "Trace id from a <code>ContextVar</code>, so every line of a request can be found together", "Redaction as a last line of defence; better still, don't log headers or bodies at all"],
+  },
+];
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const fmt = (ms) => (ms >= 1000 ? (ms / 1000).toFixed(1) + " s" : Math.round(ms) + " ms");
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+let current = SCENARIOS[0];
+let running = false;
+
+// ---------- server health indicator ----------
+const health = { samples: [], inflightSince: null, offline: false };
+
+function renderPill(ms) {
+  const pill = $("#pill");
+  if (health.offline) { pill.className = "pill bad"; pill.textContent = "Server offline"; return; }
+  if (ms > 700) { pill.className = "pill bad"; pill.textContent = `Server not responding · ${fmt(ms)}`; }
+  else { pill.className = "pill ok"; pill.textContent = `Server responsive · ${Math.max(1, Math.round(ms))} ms`; }
+}
+
+async function healthLoop() {
+  for (;;) {
+    const start = performance.now();
+    health.inflightSince = start;
+    try { const r = await fetch("/health", { cache: "no-store" }); health.offline = !r.ok; }
+    catch { health.offline = true; }
+    const end = performance.now();
+    health.inflightSince = null;
+    health.samples.push({ start, end, ms: end - start });
+    if (health.samples.length > 600) health.samples.shift();
+    renderPill(end - start);
+    await sleep(health.offline ? 1500 : 400);
+  }
+}
+setInterval(() => {
+  if (health.inflightSince && performance.now() - health.inflightSince > 700) renderPill(performance.now() - health.inflightSince);
+}, 200);
+
+function freezeBetween(t0, t1) {
+  return health.samples.filter((s) => s.end >= t0 && s.start <= t1).reduce((m, s) => Math.max(m, s.ms), 0);
+}
+
+async function waitForServer() {
+  for (;;) {
+    const s = performance.now();
+    try { await fetch("/health", { cache: "no-store" }); } catch {}
+    if (performance.now() - s < 300) return performance.now();
+    setStatus("Waiting for the server to recover…");
+    await sleep(200);
+  }
+}
+
+// ---------- calling the endpoints ----------
+async function callOnce(kind, sc, overrides = {}) {
+  const rid = crypto.randomUUID();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), CLIENT_TIMEOUT_MS);
+  const t0 = performance.now();
+  let status = null, body = null, aborted = false;
+  try {
+    const res = await fetch(`/${kind}/tickets/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: AUTH, "X-Chaos": sc.chaos, "X-Demo-Request-Id": rid },
+      body: JSON.stringify({ ...sc.payload, ...overrides }),
+      signal: ctrl.signal,
+    });
+    status = res.status;
+    const text = await res.text();
+    try { body = JSON.parse(text); } catch { body = text; }
+  } catch { aborted = true; }
+  clearTimeout(timer);
+  const t1 = performance.now();
+  return { kind, rid, status, body, aborted, t0, t1, ms: t1 - t0 };
+}
+
+async function callLoad(kind, sc) {
+  const t0 = performance.now();
+  const reqs = await Promise.all(Array.from({ length: sc.load }, (_, i) => callOnce(kind, sc, { ticket_id: `TCK-2000${i + 1}` })));
+  const t1 = performance.now();
+  return { kind, load: true, reqs, t0, t1, ms: t1 - t0 };
+}
+
+async function logsAfter(seq) {
+  const r = await fetch(`/demo/logs?after=${seq}`, { cache: "no-store" });
+  return r.json();
+}
+
+async function spansFor(rid) {
+  const r = await fetch(`/demo/spans/${rid}`, { cache: "no-store" });
+  return (await r.json()).spans;
+}
+
+async function runSide(kind, sc, cursor) {
+  setColRunning(kind);
+  const result = sc.load ? await callLoad(kind, sc) : await callOnce(kind, sc);
+  const recoveredAt = await waitForServer();
+  result.freezeMs = freezeBetween(result.t0, recoveredAt);
+  const logs = await logsAfter(cursor);
+  result.logs = logs.lines;
+  result.cursor = logs.last_seq;
+  result.spans = result.load ? [] : await spansFor(result.rid);
+  return result;
+}
+
+async function run() {
+  if (running) return;
+  running = true;
+  setBusy(true);
+  const sc = current;
+  resetCols();
+  try {
+    const start = await logsAfter(Number.MAX_SAFE_INTEGER);
+    setStatus("Calling the production endpoint…");
+    const prod = await runSide("prod", sc, start.last_seq);
+    renderCol(sc, prod, scaleFor([prod]));
+    setStatus("Calling the naive endpoint…");
+    const naive = await runSide("naive", sc, prod.cursor);
+    const scale = scaleFor([prod, naive]);
+    renderCol(sc, prod, scale);
+    renderCol(sc, naive, scale);
+    setStatus("Done. Production ran first, because the naive endpoint can freeze the whole server.");
+  } catch (err) {
+    setStatus(`Demo error: ${err}. Is the server running?`);
+  } finally {
+    running = false;
+    setBusy(false);
+  }
+}
+
+// ---------- judging ----------
+const isValid = (b) => b && typeof b === "object" && ["P1", "P2", "P3"].includes(b.priority) && CATEGORIES.includes(b.category);
+const LEAKS = [/demo-secret-token-\w+/, /priya\.sharma@example\.com/, /\+?91?\s?98765\s?43210/];
+const hasLeak = (lines) => lines.some((l) => LEAKS.some((re) => re.test(l.text)));
+
+function judge(sc, r) {
+  const freeze = r.freezeMs > 1500 ? ` The server froze for ${fmt(r.freezeMs)}, so every other user was stuck too.` : "";
+  if (r.load) {
+    const last = Math.max(...r.reqs.map((q) => q.t1 - r.t0));
+    const failed = r.reqs.filter((q) => q.aborted || q.status !== 200).length;
+    if (failed) return ["fail", `${failed} of ${r.reqs.length} requests failed.${freeze}`];
+    if (r.freezeMs > 1000) return ["fail", `Handled one at a time: the last user waited ${fmt(last)}.${freeze}`];
+    return ["pass", `All ${r.reqs.length} users served together in ${fmt(last)}. The server stayed responsive.`];
+  }
+  if (r.aborted) return ["fail", `No response after ${CLIENT_TIMEOUT_MS / 1000} s. The user is still looking at a spinner.${freeze}`];
+  if (r.status >= 500) return ["fail", `Crashed with HTTP ${r.status}. The caller gets "Internal Server Error" and no idea why.${freeze}`];
+  if (r.status === 422) return ["pass", "Rejected with HTTP 422, naming each bad field, so the caller can fix it."];
+  if (r.status !== 200) return ["warn", `HTTP ${r.status}`];
+  if (!isValid(r.body)) return ["fail", `HTTP 200, but the data is garbage (priority "${r.body.priority}"). No error, no alert, and downstream routing breaks.`];
+  if (sc.id === "logs") {
+    return hasLeak(r.logs)
+      ? ["fail", "Auth token, customer email and phone number written to the logs in plain text."]
+      : ["pass", "Structured JSON logs with a trace id. Email, phone and token scrubbed."];
+  }
+  if (r.body.needs_human_review) return ["pass", "Bad model output caught by validation. Safe fallback, ticket flagged for a human."];
+  if (r.body.degraded) return ["pass", `Answered in ${fmt(r.ms)} with what it had. The hung call was cut off and the result flagged as degraded.`];
+  if ((r.body.warnings || []).some((w) => w.includes("recovered"))) return ["pass", "Hit the 503, retried with backoff, and recovered. The user never noticed."];
+  if (sc.id === "slow") {
+    return r.ms > 2500
+      ? ["warn", `Correct, but took ${fmt(r.ms)}: the three LLM calls ran one after another.${freeze}`]
+      : ["pass", `Same answer in ${fmt(r.ms)}: the three LLM calls ran in parallel.`];
+  }
+  if (sc.id === "happy" && r.kind === "naive") return ["pass", "HTTP 200. Looks fine, and that's the trap."];
+  return ["pass", "HTTP 200 with a typed response and a trace id."];
+}
+
+// ---------- rendering ----------
+const LABEL = { fail: "FAIL", pass: "PASS", warn: "SLOW" };
+
+function setVerdict(col, level, text) {
+  const v = $(".verdict", col);
+  v.className = `verdict ${level}`;
+  $(".badge", v).textContent = LABEL[level] || (level === "running" ? "RUNNING" : "READY");
+  $(".vt", v).textContent = text;
+}
+
+function scaleFor(results) {
+  let max = 1000;
+  for (const r of results) {
+    if (r.load) r.reqs.forEach((q) => (max = Math.max(max, q.t1 - r.t0)));
+    else {
+      r.spans.forEach((s) => (max = Math.max(max, s.end_ms)));
+      if (r.aborted) max = Math.max(max, CLIENT_TIMEOUT_MS);
+    }
+  }
+  return max * 1.05;
+}
+
+function bar(left, width, cls, text, max) {
+  const l = (left / max) * 100;
+  const w = Math.max((width / max) * 100, 0.4);
+  if (w > 28) return `<div class="bar ${cls}" style="left:${l}%;width:${w}%">${text}</div>`;
+  return `<div class="bar ${cls}" style="left:${l}%;width:${w}%"></div><span class="blabel" style="left:calc(${l + w}% + 6px)">${text}</span>`;
+}
+
+function renderTimeline(col, sc, r, max) {
+  const el = $(".timeline", col);
+  $(".tl-title", col).textContent = r.load ? "Requests (time until each user got an answer)" : "LLM calls";
+  let rows = "";
+  if (r.load) {
+    r.reqs.forEach((q, i) => {
+      const done = q.t1 - r.t0;
+      const cls = q.aborted || q.status !== 200 ? "error" : "";
+      rows += `<div class="trow"><span class="lbl">User ${i + 1}</span><div class="track">${bar(0, done, cls, fmt(done), max)}</div></div>`;
+    });
+  } else if (!r.spans.length) {
+    const why = r.status === 422 ? "No LLM calls: rejected before spending a single token." : "Crashed before calling the LLM.";
+    el.innerHTML = `<div class="empty">${why}</div>`;
+    return;
+  } else {
+    [...r.spans].sort((a, b) => a.start_ms - b.start_ms).forEach((s) => {
+      const dur = s.end_ms - s.start_ms;
+      const label = s.task + (s.attempt > 1 ? " (retry)" : "");
+      const note = s.outcome === "ok" ? fmt(dur) : `${s.outcome === "timeout" ? "timed out" : "503 error"} · ${fmt(dur)}`;
+      const cls = s.outcome === "ok" ? "" : s.outcome;
+      const marker = r.aborted ? `<div class="marker" style="left:${(CLIENT_TIMEOUT_MS / max) * 100}%" title="client gave up"></div>` : "";
+      rows += `<div class="trow"><span class="lbl">${esc(label)}</span><div class="track">${bar(s.start_ms, dur, cls, note, max)}${marker}</div></div>`;
+    });
+  }
+  const gaveUp = r.aborted ? `<div class="legend"><span class="swatch"></span>Red line: the browser gave up after ${CLIENT_TIMEOUT_MS / 1000} s</div>` : "";
+  el.innerHTML = rows + `<div class="axis"><div></div><div><span>0</span><span>${fmt(max)}</span></div></div>${gaveUp}`;
+}
+
+function renderMetrics(col, r) {
+  let status, statusCls, latency;
+  if (r.load) {
+    const ok = r.reqs.filter((q) => q.status === 200).length;
+    status = `${ok}/${r.reqs.length} OK`; statusCls = ok === r.reqs.length ? "good" : "bad";
+    latency = fmt(Math.max(...r.reqs.map((q) => q.t1 - r.t0)));
+  } else {
+    status = r.aborted ? "No response" : `HTTP ${r.status}`;
+    statusCls = r.aborted || r.status >= 500 ? "bad" : r.status === 200 && !isValid(r.body) ? "bad" : "good";
+    latency = r.aborted ? `> ${CLIENT_TIMEOUT_MS / 1000} s` : fmt(r.ms);
+  }
+  const frozen = r.freezeMs > 1000;
+  $(".metrics", col).innerHTML = `
+    <div class="metric"><div class="k">Status</div><div class="v ${statusCls}">${status}</div></div>
+    <div class="metric"><div class="k">${r.load ? "Last user served" : "Latency"}</div><div class="v">${latency}</div></div>
+    <div class="metric"><div class="k">Server frozen</div><div class="v ${frozen ? "bad" : "good"}">${frozen ? fmt(r.freezeMs) : "No"}</div></div>`;
+}
+
+function highlightLog(text) {
+  let h = esc(text);
+  h = h.replace(/(demo-secret-token-\w+|priya\.sharma@example\.com|\+91 98765 43210)/g, '<mark class="leak">$1</mark>');
+  h = h.replace(/(&lt;email&gt;|&lt;phone&gt;|&lt;card&gt;|Bearer &lt;redacted&gt;)/g, '<mark class="safe">$1</mark>');
+  if (/"level": "(WARNING)"/.test(text)) h = `<span class="lvl-warn">${h}</span>`;
+  if (/"level": "(ERROR)"|^ERROR|Traceback|Error:/.test(text)) h = `<span class="lvl-err">${h}</span>`;
+  return h;
+}
+
+function renderCol(sc, r, scale) {
+  const col = $(`#col-${r.kind}`);
+  const [level, text] = judge(sc, r);
+  setVerdict(col, level, text);
+  renderMetrics(col, r);
+  renderTimeline(col, sc, r, scale);
+  const body = r.load ? r.reqs.map((q) => q.body) : r.aborted ? "(no response: the browser gave up)" : r.body;
+  $(".resp", col).textContent = typeof body === "string" ? body : JSON.stringify(body, null, 2);
+  const lines = r.logs.slice(-40);
+  $(".logs", col).innerHTML = lines.length ? lines.map((l) => highlightLog(l.text)).join("\n") : "(nothing logged)";
+}
+
+function setColRunning(kind) {
+  setVerdict($(`#col-${kind}`), "running", kind === "naive" ? "Calling the naive endpoint…" : "Calling the production endpoint…");
+}
+
+function resetCols() {
+  for (const kind of ["naive", "prod"]) {
+    const col = $(`#col-${kind}`);
+    setVerdict(col, "idle", "Waiting…");
+    $(".metrics", col).innerHTML = "";
+    $(".timeline", col).innerHTML = "";
+    $(".resp", col).textContent = "—";
+    $(".logs", col).textContent = "—";
+  }
+}
+
+function setStatus(text) { $("#status").textContent = text; }
+
+function setBusy(busy) {
+  $("#run").disabled = busy;
+  $("#run").textContent = busy ? "Running…" : "Run scenario";
+  document.querySelectorAll("nav button").forEach((b) => (b.disabled = busy));
+}
+
+function requestPreview(sc) {
+  const headers = { "Content-Type": "application/json", Authorization: AUTH, "X-Chaos": sc.chaos };
+  const n = sc.load ? `  (sent ${sc.load} times at once)` : "";
+  return `POST /{naive|prod}/tickets/analyze${n}\n` +
+    Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join("\n") +
+    `\n\n${JSON.stringify(sc.payload, null, 2)}\n\n# X-Chaos tells the mock LLM which failure to simulate (demo only).`;
+}
+
+function select(sc) {
+  current = sc;
+  const i = SCENARIOS.indexOf(sc);
+  $("#eyebrow").textContent = `Scenario ${i + 1} of ${SCENARIOS.length} · ${sc.tag}`;
+  $("#title").textContent = sc.title;
+  $("#sim").innerHTML = sc.sim;
+  $("#watch").textContent = " " + sc.watch;
+  $("#request").textContent = requestPreview(sc);
+  $("#fixes").innerHTML = sc.fixes.map((f) => `<li>${f}</li>`).join("");
+  document.querySelectorAll("nav button").forEach((b, j) => b.setAttribute("aria-current", String(j === i)));
+  resetCols();
+  setVerdict($("#col-naive"), "idle", "Not run yet");
+  setVerdict($("#col-prod"), "idle", "Not run yet");
+}
+
+function buildNav() {
+  $("#nav").innerHTML = SCENARIOS.map((sc, i) =>
+    `<button data-i="${i}"><span class="n">${i + 1}</span><span class="t">${esc(sc.title)}</span><span class="s">${esc(sc.tag)}</span></button>`
+  ).join("") + `<div class="hint">Keys: 1–${SCENARIOS.length} to choose, Enter to run</div>`;
+  $("#nav").addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (b && !running) select(SCENARIOS[+b.dataset.i]);
+  });
+}
+
+document.addEventListener("keydown", (e) => {
+  if (running || e.target.closest("input, textarea")) return;
+  const n = parseInt(e.key, 10);
+  if (n >= 1 && n <= SCENARIOS.length) select(SCENARIOS[n - 1]);
+  if (e.key === "Enter") run();
+});
+$("#run").addEventListener("click", run);
+
+buildNav();
+select(SCENARIOS[0]);
+healthLoop();
+</script>
+</body>
+</html>
