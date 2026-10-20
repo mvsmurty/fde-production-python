@@ -28,6 +28,9 @@ button { font: inherit; cursor: pointer; }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
 .topbar h1 { margin: 0; font-size: 19px; }
 .topbar p { margin: 0; color: var(--muted); font-size: 14px; }
+.top-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.llm { font-size: 13px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px; white-space: nowrap; }
+.llm b { color: var(--ink); }
 .pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; font-size: 14px; font-weight: 600; white-space: nowrap; transition: background .2s, color .2s; }
 .pill::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
 .pill.ok { background: var(--pass-bg); color: var(--pass); }
@@ -122,7 +125,10 @@ pre.code .lvl-warn { color: #f0b44c; } pre.code .lvl-err { color: #ff7b7b; }
     <h1>Ticket Triage: naive vs production</h1>
     <p>Same ticket, same LLM, two endpoints.</p>
   </div>
-  <span id="pill" class="pill ok">Checking server…</span>
+  <div class="top-right">
+    <span id="llm" class="llm"></span>
+    <span id="pill" class="pill ok">Checking server…</span>
+  </div>
 </header>
 
 <div class="layout">
@@ -245,6 +251,17 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 
 let current = SCENARIOS[0];
 let running = false;
+let llmInfo = { provider: "mock", model: "keyword mock" };
+
+async function loadLLMInfo() {
+  try { llmInfo = await (await fetch("/demo/info", { cache: "no-store" })).json(); } catch {}
+  $("#llm").innerHTML = llmInfo.provider === "xai"
+    ? `LLM: <b>xAI ${esc(llmInfo.model)}</b> · mock for injected failures`
+    : "LLM: <b>mock</b> (offline)";
+  select(current);
+}
+
+const answeredBy = (sc) => (llmInfo.provider === "xai" && sc.chaos === "none" ? `live xAI ${llmInfo.model}` : "mock LLM");
 
 // ---------- server health indicator ----------
 const health = { samples: [], inflightSince: null, offline: false };
@@ -469,7 +486,7 @@ function renderMetrics(col, r) {
     statusCls = r.aborted || r.status >= 500 ? "bad" : r.status === 200 && !isValid(r.body) ? "bad" : "good";
     latency = r.aborted ? `> ${CLIENT_TIMEOUT_MS / 1000} s` : fmt(r.ms);
   }
-  const frozen = r.freezeMs > 1000;
+  const frozen = r.freezeMs > 1500;
   $(".metrics", col).innerHTML = `
     <div class="metric"><div class="k">Status</div><div class="v ${statusCls}">${status}</div></div>
     <div class="metric"><div class="k">${r.load ? "Last user served" : "Latency"}</div><div class="v">${latency}</div></div>
@@ -531,7 +548,7 @@ function requestPreview(sc) {
 function select(sc) {
   current = sc;
   const i = SCENARIOS.indexOf(sc);
-  $("#eyebrow").textContent = `Scenario ${i + 1} of ${SCENARIOS.length} · ${sc.tag}`;
+  $("#eyebrow").textContent = `Scenario ${i + 1} of ${SCENARIOS.length} · ${sc.tag} · ${answeredBy(sc)}`;
   $("#title").textContent = sc.title;
   $("#sim").innerHTML = sc.sim;
   $("#watch").textContent = " " + sc.watch;
@@ -563,6 +580,7 @@ $("#run").addEventListener("click", run);
 
 buildNav();
 select(SCENARIOS[0]);
+loadLLMInfo();
 healthLoop();
 </script>
 </body>

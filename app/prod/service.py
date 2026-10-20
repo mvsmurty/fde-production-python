@@ -24,7 +24,7 @@ def parse_summary(raw: str) -> str:
 
 
 def parse_sentiment(raw: str) -> Sentiment:
-    return _sentiment.validate_python(raw.strip().lower())
+    return _sentiment.validate_python(raw.strip().strip(".!").lower())
 
 
 async def call_llm[T](

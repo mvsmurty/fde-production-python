@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
+from app.llm import llm
 from app.naive import router as naive_router
 from app.prod.observability import configure_logging, trace_id_var
 from app.prod.routes import router as prod_router
@@ -24,8 +25,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
         install_log_capture()
     configure_logging(settings.log_level)
-    log.info("startup", extra={"demo_mode": settings.demo_mode})
+    log.info("startup", extra={"demo_mode": settings.demo_mode, **llm.describe()})
     yield
+    await llm.aclose()
     log.info("shutdown")
 
 

@@ -31,6 +31,19 @@ Run uvicorn with a single worker (the default). The "LLM hangs" and "Traffic spi
 
 Scenarios are triggered with an `X-Chaos` request header that the mock LLM reads. That header, the `/demo` endpoints and the UI exist only when `TRIAGE_DEMO_MODE=true` (the default here).
 
+## Using a real LLM (xAI Grok)
+
+The mock is the default. To answer with Grok instead:
+
+```bash
+cp .env.example .env   # then put your key in TRIAGE_XAI_API_KEY
+uv run uvicorn app.main:app --port 8077
+```
+
+The top bar shows which model is answering. Only scenarios with no injected failure (1, 2 and 8) go to Grok; the failure scenarios always use the mock so they behave the same every run. The naive endpoint calls Grok with a blocking `httpx.Client`, while production uses one shared `httpx.AsyncClient` with a timeout, and retries on 429/5xx.
+
+`.env` is git-ignored. Never commit it, and never paste the key into chat or code.
+
 ## Checks
 
 ```bash

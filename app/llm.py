@@ -1,16 +1,18 @@
-"""A stand-in for an LLM provider SDK.
+"""LLM clients: a deterministic mock and a real xAI (Grok) client, behind one `llm` object.
 
-`MockLLMClient.complete` blocks like `OpenAI().chat.completions.create`;
-`MockLLMClient.acomplete` awaits like `AsyncOpenAI().chat.completions.create`.
-Answers are keyword-based so the demo is deterministic and needs no API key.
+Each client has `complete` (blocks, like `OpenAI()` / `httpx.Client`) and
+`acomplete` (awaits, like `AsyncOpenAI()` / `httpx.AsyncClient`).
 """
 
 import asyncio
 import json
 import time
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
+import httpx
+
+from app.config import get_settings
 from app.demo import chaos
 
 Task = Literal["summarize", "classify", "sentiment"]
@@ -115,4 +117,127 @@ class MockLLMClient:
         return result
 
 
-llm = MockLLMClient()
+PROMPTS: dict[Task, str] = {
+    "summarize": (
+        "Summarise this customer support ticket in one sentence of at most 25 words. "
+        "Reply with the sentence only."
+    ),
+    "classify": (
+        'Classify this customer support ticket. Reply with only a JSON object: '
+        '{"category": "...", "priority": "..."}. '
+        "category is one of: billing, technical, account, general. "
+        "priority is P1 (service down or money lost), P2 (customer blocked) or P3 (question)."
+    ),
+    "sentiment": (
+        "What is the customer's sentiment in this support ticket? "
+        "Reply with exactly one word: positive, neutral or negative."
+    ),
+}
+
+
+class XAIClient:
+    """Calls xAI's OpenAI-compatible chat completions API."""
+
+    def __init__(self, api_key: str, model: str, base_url: str):
+        self._headers = {"Authorization": f"Bearer {api_key}"}
+        self._model = model
+        self._url = f"{base_url.rstrip('/')}/chat/completions"
+        self._async: httpx.AsyncClient | None = None
+
+    def _payload(self, task: Task, text: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": PROMPTS[task]},
+                {"role": "user", "content": text},
+            ],
+        }
+        if task == "classify":
+            payload["response_format"] = {"type": "json_object"}
+        return payload
+
+    @staticmethod
+    def _content(response: httpx.Response) -> str:
+        if response.status_code == 429 or response.status_code >= 500:
+            raise LLMUnavailableError(f"{response.status_code} from xAI")
+        response.raise_for_status()
+        content: str = response.json()["choices"][0]["message"]["content"]
+        return content
+
+    def complete(self, task: Task, text: str) -> str:
+        chaos.current().attempts[task] += 1
+        span = _Span(task)
+        try:
+            with httpx.Client(timeout=60) as client:
+                response = client.post(self._url, headers=self._headers, json=self._payload(task, text))
+            result = self._content(response)
+        except Exception:
+            span.close("error")
+            raise
+        span.close("ok")
+        return result
+
+    async def acomplete(self, task: Task, text: str) -> str:
+        if self._async is None:
+            self._async = httpx.AsyncClient(timeout=30)
+        chaos.current().attempts[task] += 1
+        span = _Span(task)
+        try:
+            response = await self._async.post(
+                self._url, headers=self._headers, json=self._payload(task, text)
+            )
+            result = self._content(response)
+        except asyncio.CancelledError:
+            span.close("timeout")
+            raise
+        except Exception:
+            span.close("error")
+            raise
+        span.close("ok")
+        return result
+
+    async def aclose(self) -> None:
+        if self._async is not None:
+            await self._async.aclose()
+            self._async = None
+
+
+class LLM:
+    """Picks the provider per call. Injected failure scenarios always use the mock, so they repeat."""
+
+    def __init__(self) -> None:
+        self.mock = MockLLMClient()
+        self._xai: XAIClient | None = None
+
+    def _live(self) -> XAIClient | None:
+        settings = get_settings()
+        if settings.llm_provider != "xai" or chaos.current().scenario != "none":
+            return None
+        if self._xai is None:
+            assert settings.xai_api_key is not None
+            self._xai = XAIClient(
+                settings.xai_api_key.get_secret_value(), settings.xai_model, settings.xai_base_url
+            )
+        return self._xai
+
+    def complete(self, task: Task, text: str) -> str:
+        live = self._live()
+        return live.complete(task, text) if live else self.mock.complete(task, text)
+
+    async def acomplete(self, task: Task, text: str) -> str:
+        live = self._live()
+        return await live.acomplete(task, text) if live else await self.mock.acomplete(task, text)
+
+    async def aclose(self) -> None:
+        if self._xai is not None:
+            await self._xai.aclose()
+
+    def describe(self) -> dict[str, str]:
+        settings = get_settings()
+        if settings.llm_provider == "xai":
+            return {"provider": "xai", "model": settings.xai_model}
+        return {"provider": "mock", "model": "keyword mock"}
+
+
+llm = LLM()

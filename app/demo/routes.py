@@ -9,6 +9,7 @@ from typing import TextIO
 from fastapi import APIRouter
 
 from app.demo.middleware import spans_by_request
+from app.llm import llm
 
 router = APIRouter(prefix="/demo", include_in_schema=False)
 
@@ -70,6 +71,11 @@ async def logs(after: int = 0) -> dict[str, object]:
         lines = [{"seq": s, "text": t} for s, t in _lines if s > after]
         last = _seq
     return {"lines": lines, "last_seq": last}
+
+
+@router.get("/info")
+async def info() -> dict[str, str]:
+    return llm.describe()
 
 
 @router.get("/spans/{request_id}")
