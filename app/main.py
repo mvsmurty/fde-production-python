@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.llm import llm
 from app.naive import router as naive_router
 from app.prod.errors import APIError
+from app.prod.limits import BodySizeLimitMiddleware
 from app.prod.observability import configure_logging, trace_id_var
 from app.prod.routes import router as prod_router
 
@@ -35,6 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Ticket Triage", lifespan=lifespan)
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes, path_prefix="/prod")
 app.include_router(naive_router)
 app.include_router(prod_router)
 

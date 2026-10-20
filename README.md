@@ -14,7 +14,7 @@ uv sync
 uv run uvicorn app.main:app --port 8077
 ```
 
-Open http://localhost:8077, pick a scenario (keys 1–9 and 0, or ↑ ↓), press Enter.
+Open http://localhost:8077, pick a scenario (keys 1–9 and 0, or ↑ ↓), press Enter. The out-of-memory scenario prints 4 MB lines from the naive endpoint, so you may want `> /dev/null` on the uvicorn command.
 
 Run uvicorn with a single worker (the default). The traffic-spike and hang scenarios show the naive endpoint freezing the whole server, which a multi-worker setup would partly hide.
 
@@ -33,6 +33,7 @@ Each scenario is an incident that worked in development and failed in production
 | 9 | Unexpected input | 500, no explanation | 422 naming each bad field |
 | 10 | Bad model output | 200 with garbage | Validated, falls back, flags for a human |
 | 11 | Logs and secrets | Token, email, phone in logs | JSON with trace id, PII scrubbed |
+| 12 | Out of memory (10 × 4 MB tickets) | Accepts them, keeps every one in a global list | 413 before the body is read |
 
 Scenarios are triggered with an `X-Chaos` request header that the mock LLM reads. That header, the `/demo` endpoints and the UI exist only when `TRIAGE_DEMO_MODE=true` (the default here).
 

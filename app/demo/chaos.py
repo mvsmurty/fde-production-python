@@ -7,10 +7,10 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 Scenario = Literal[
-    "none", "slow", "load", "ratelimit", "flood", "hang", "outage", "bug", "garbage"
+    "none", "slow", "load", "ratelimit", "flood", "hang", "outage", "bug", "garbage", "oom"
 ]
 SCENARIOS: tuple[Scenario, ...] = (
-    "none", "slow", "load", "ratelimit", "flood", "hang", "outage", "bug", "garbage"
+    "none", "slow", "load", "ratelimit", "flood", "hang", "outage", "bug", "garbage", "oom"
 )
 
 

@@ -18,11 +18,20 @@ class SlidingWindowLimiter:
     In memory and per process: behind several replicas, use a shared store (Redis) or the gateway.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_clients: int = 10_000) -> None:
         self._hits: defaultdict[str, deque[float]] = defaultdict(deque)
+        self._max_clients = max_clients
+
+    def _forget_idle(self, now: float, window_s: float) -> None:
+        # One entry per client ever seen would grow until the process runs out of memory.
+        idle = [c for c, hits in self._hits.items() if not hits or hits[-1] <= now - window_s]
+        for client in idle:
+            del self._hits[client]
 
     def retry_after(self, client: str, limit: int, window_s: float) -> float | None:
         now = time.monotonic()
+        if len(self._hits) >= self._max_clients:
+            self._forget_idle(now, window_s)
         hits = self._hits[client]
         while hits and hits[0] <= now - window_s:
             hits.popleft()

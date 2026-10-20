@@ -11,11 +11,14 @@ from app.llm import llm
 
 router = APIRouter()
 
+ticket_history = []
+
 
 @router.post("/naive/tickets/analyze")
-async def analyze_ticket(request: Request):  # type: ignore[no-untyped-def]
+async def analyze_ticket(request: Request):
     payload = await request.json()
     print("Got request:", dict(request.headers), payload)
+    ticket_history.append(payload)
 
     text = payload["subject"] + "\n" + payload["body"]
 

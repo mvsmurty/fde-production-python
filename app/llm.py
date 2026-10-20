@@ -50,7 +50,7 @@ def _plan(task: Task) -> _Plan:
     match state.scenario:
         case "slow":
             return _Plan(SLOW_LATENCY_S)
-        case "flood":
+        case "flood" | "oom":
             return _Plan(FAST_LATENCY_S)
         case "hang" if task == "sentiment":
             return _Plan(HANG_S)

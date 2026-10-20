@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     llm_max_concurrency: int = 8
     rate_limit_requests: int = 5
     rate_limit_window_s: float = 10.0
+    # A ticket is a few KB. Anything far bigger is rejected before its body is read.
+    max_body_bytes: int = 64 * 1024
     log_level: str = "INFO"
     # Enables the chaos header, span tracking and the /demo endpoints. Never on in a real deployment.
     demo_mode: bool = True

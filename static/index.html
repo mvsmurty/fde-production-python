@@ -196,6 +196,8 @@ const TICKET = {
   subject: "Charged twice for my order",
   body: "Hi, I was charged twice for order #A-77812. Please refund ASAP. Call me on +91 98765 43210. This is really frustrating!",
 };
+const BIG_BODY_CHARS = 4_000_000;
+const BIG_BODY = "Forwarded thread with attachments:\n" + "A".repeat(BIG_BODY_CHARS);
 
 const SCENARIOS = [
   {
@@ -264,6 +266,14 @@ const SCENARIOS = [
     sim: "<b>In development</b> you read print() output in one terminal. <b>In production</b> logs from every replica go to a shared system that many people can read.",
     watch: "Naive prints every header (including the Authorization token) plus the customer's email and phone number. Production writes one JSON object per line, with a trace id, and scrubs personal data.",
     fixes: ["<code>JsonFormatter</code> in <code>app/prod/observability.py</code>: structured, searchable, one event per line", "Trace id from a <code>ContextVar</code>, so every line of a request can be found together", "Redaction as a last line of defence; better still, don't log headers or bodies at all"],
+  },
+  {
+    id: "oom", title: "Out of memory", tag: "10 tickets of 4 MB each", chaos: "oom", flood: 10, memory: true,
+    payload: { ...TICKET, body: BIG_BODY },
+    preview: { ...TICKET, body: `Forwarded thread with attachments: AAAA… (${BIG_BODY_CHARS.toLocaleString()} characters)` },
+    sim: "<b>In development</b> your laptop had 16 GB and you restarted the server every few minutes. <b>In production</b> the container has 512 MB, runs for weeks, and customers paste 4 MB email threads.",
+    watch: "Naive has no size limit and keeps every ticket in a global list \"for debugging\". Memory jumps on every batch, and the list only ever grows: run it again and watch the count climb. Production rejects anything over 64 KB with 413 before reading the body.",
+    fixes: ["<code>BodySizeLimitMiddleware</code> in <code>app/prod/limits.py</code>: 413 before the body is read (Pydantic's <code>max_length</code> runs too late)", "No unbounded globals: caches and histories need a size cap or a TTL", "Even our rate limiter had this bug: one entry per client forever. It now forgets idle clients", "An OOM kill has no traceback: watch memory and restarts (exit code 137)"],
   },
 ];
 
@@ -373,6 +383,14 @@ async function logsAfter(seq) {
   return r.json();
 }
 
+let lastMemory = null;
+
+async function memoryNow() {
+  const r = await fetch("/demo/memory", { cache: "no-store" });
+  lastMemory = await r.json();
+  return lastMemory.rss_mb;
+}
+
 async function spansFor(rid) {
   const r = await fetch(`/demo/spans/${rid}`, { cache: "no-store" });
   return (await r.json()).spans;
@@ -381,8 +399,10 @@ async function spansFor(rid) {
 async function runSide(kind, sc, cursor) {
   setColRunning(kind);
   runClientId = `${kind}-${crypto.randomUUID().slice(0, 8)}`;
+  const memBefore = sc.memory ? await memoryNow() : null;
   const result = sc.load ? await callLoad(kind, sc) : sc.flood ? await callFlood(kind, sc) : await callOnce(kind, sc);
   const recoveredAt = await waitForServer();
+  if (sc.memory) { result.memBefore = memBefore; result.memAfter = await memoryNow(); result.kept = lastMemory; }
   result.freezeMs = freezeBetween(result.t0, recoveredAt);
   const logs = await logsAfter(cursor);
   result.logs = logs.lines;
@@ -429,6 +449,12 @@ function judge(sc, r) {
     if (failed) return ["fail", `${failed} of ${r.reqs.length} requests failed.${freeze}`];
     if (r.freezeMs > 1000) return ["fail", `Handled one at a time: the last user waited ${fmt(last)}.${freeze}`];
     return ["pass", `All ${r.reqs.length} users served together in ${fmt(last)}. The server stayed responsive.`];
+  }
+  if (sc.id === "oom") {
+    const accepted = r.reqs.filter((q) => q.status === 200).length;
+    const grew = r.memAfter - r.memBefore;
+    if (accepted) return ["fail", `Accepted ${accepted} tickets of 4 MB: memory jumped ${grew.toFixed(0)} MB, and the global list now holds ${r.kept.naive_kept} tickets (${r.kept.naive_kept_mb.toFixed(0)} MB) that are never freed. Keep it running and a 512 MB container is OOM-killed (exit 137, no traceback).`];
+    return ["pass", `Rejected all ${r.reqs.length} with 413 before reading the body. Memory did not grow.`];
   }
   if (r.flood) {
     const accepted = r.reqs.filter((q) => q.status === 200).length;
@@ -540,6 +566,15 @@ function renderTimeline(col, sc, r, max) {
 
 function renderMetrics(col, r) {
   let status, statusCls, latency;
+  if (r.memBefore != null) {
+    const accepted = r.reqs.filter((q) => q.status === 200).length;
+    const grew = r.memAfter - r.memBefore;
+    $(".metrics", col).innerHTML = `
+      <div class="metric"><div class="k">Accepted</div><div class="v ${accepted ? "bad" : "good"}">${accepted} of ${r.reqs.length}</div></div>
+      <div class="metric"><div class="k">Server memory</div><div class="v">${r.memBefore.toFixed(0)} → ${r.memAfter.toFixed(0)} MB</div></div>
+      <div class="metric"><div class="k">${r.kind === "naive" ? "Kept forever" : "Growth"}</div><div class="v ${accepted ? "bad" : "good"}">${r.kind === "naive" ? `${r.kept.naive_kept} tickets` : `${grew >= 0 ? "+" : ""}${grew.toFixed(0)} MB`}</div></div>`;
+    return;
+  }
   if (r.flood) {
     const accepted = r.reqs.filter((q) => q.status === 200).length;
     const rejected = r.reqs.filter((q) => q.status === 429).length;
@@ -614,10 +649,10 @@ function setBusy(busy) {
 
 function requestPreview(sc) {
   const headers = { "Content-Type": "application/json", Authorization: AUTH, "X-Client-Id": "<one id per run>", "X-Chaos": sc.chaos };
-  const n = sc.load ? `  (sent ${sc.load} times at once)` : sc.flood ? `  (sent ${sc.flood} times in a row by one client)` : "";
+  const n = sc.load ? `  (sent ${sc.load} times at once)` : sc.flood ? `  (sent ${sc.flood} times in a row)` : "";
   return `POST /{naive|prod}/tickets/analyze${n}\n` +
     Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join("\n") +
-    `\n\n${JSON.stringify(sc.payload, null, 2)}\n\n# X-Chaos tells the mock LLM which failure to simulate (demo only).`;
+    `\n\n${JSON.stringify(sc.preview || sc.payload, null, 2)}\n\n# X-Chaos tells the mock LLM which failure to simulate (demo only).`;
 }
 
 function select(sc) {

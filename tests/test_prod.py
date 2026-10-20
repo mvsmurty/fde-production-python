@@ -86,6 +86,22 @@ def test_bug_returns_500_with_trace_id_and_no_internals(client: TestClient) -> N
     assert "choices" not in r.text
 
 
+def test_oversized_body_is_rejected_with_413_before_parsing(client: TestClient) -> None:
+    huge = {**TICKET, "body": "x" * 200_000}
+    r = client.post(URL, json=huge)
+    assert r.status_code == 413
+    assert r.json()["error"] == "payload_too_large"
+
+
+def test_rate_limiter_forgets_idle_clients() -> None:
+    from app.prod.ratelimit import SlidingWindowLimiter
+
+    limiter = SlidingWindowLimiter(max_clients=3)
+    for i in range(50):
+        limiter.retry_after(f"client-{i}", limit=5, window_s=0.0)
+    assert len(limiter._hits) <= 3
+
+
 def test_client_over_its_limit_gets_429() -> None:
     with _client(rate_limit_requests=2) as c:
         headers = {"X-Client-Id": "flooder", "X-Chaos": "flood"}

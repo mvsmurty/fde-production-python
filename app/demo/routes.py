@@ -1,11 +1,13 @@
 """Lets the UI show what the server printed and how long each LLM call took."""
 
+import gc
 import logging
 import sys
 import threading
 from collections import deque
 from typing import TextIO
 
+import psutil
 from fastapi import APIRouter
 
 from app.demo.middleware import spans_by_request
@@ -17,6 +19,7 @@ _lines: deque[tuple[int, str]] = deque(maxlen=3000)
 _seq = 0
 _lock = threading.Lock()
 _installed = False
+_MAX_LINE = 1500
 
 
 def _record(text: str) -> None:
@@ -25,6 +28,8 @@ def _record(text: str) -> None:
         for line in text.splitlines():
             if line.strip():
                 _seq += 1
+                if len(line) > _MAX_LINE:
+                    line = f"{line[:_MAX_LINE]}… [{len(line) - _MAX_LINE:,} more characters]"
                 _lines.append((_seq, line))
 
 
@@ -76,6 +81,20 @@ async def logs(after: int = 0) -> dict[str, object]:
 @router.get("/info")
 async def info() -> dict[str, str]:
     return llm.describe()
+
+
+@router.get("/memory")
+async def memory() -> dict[str, float]:
+    from app.naive import ticket_history
+
+    gc.collect()
+    rss = psutil.Process().memory_info().rss
+    kept_chars = sum(len(str(t.get("body", ""))) for t in ticket_history)
+    return {
+        "rss_mb": round(rss / 1024 / 1024, 1),
+        "naive_kept": len(ticket_history),
+        "naive_kept_mb": round(kept_chars / 1024 / 1024, 1),
+    }
 
 
 @router.get("/spans/{request_id}")
