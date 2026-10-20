@@ -37,6 +37,23 @@ Each scenario is an incident that worked in development and failed in production
 
 Scenarios are triggered with an `X-Chaos` request header that the mock LLM reads. That header, the `/demo` endpoints and the UI exist only when `TRIAGE_DEMO_MODE=true` (the default here).
 
+## Lab
+
+`app/lab.py` (`POST /lab/tickets/analyze`) starts as a copy of the naive endpoint, with TODOs:
+
+1. Validate at the edge with `TicketIn` (bad input gets a 422)
+2. Use `await llm.acomplete` with `asyncio.gather` (no blocking, calls run together)
+3. Wrap each call in `asyncio.timeout(3)` and degrade instead of hanging
+4. Stretch: 503 for a provider outage, a 500 with a trace id for bugs
+
+Check your progress; the tests start red and turn green step by step:
+
+```bash
+uv run pytest tests/test_lab.py
+```
+
+To see it in the UI, choose **Lab (your code)** in the "Compare … with production" menu at the top. The normal `uv run pytest` skips the lab tests. A reference solution is on the `lab-solution` branch.
+
 ## Using a real LLM (xAI Grok)
 
 The mock is the default. To answer with Grok instead:
